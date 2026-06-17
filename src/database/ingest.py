@@ -77,6 +77,16 @@ CREATE INDEX IF NOT EXISTS idx_compliance_device_check
 
 CREATE INDEX IF NOT EXISTS idx_compliance_snapshot
     ON compliance_checks (snapshot_id);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    log_id TEXT PRIMARY KEY,
+    timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+    thread_id TEXT,
+    company_id TEXT,
+    actor TEXT,
+    action_type TEXT,
+    details TEXT
+);
 """
 
 UPSERT_DEVICE_SQL = """
@@ -341,11 +351,15 @@ def main() -> None:
         compliance_count = conn.execute(
             "SELECT COUNT(*) FROM compliance_checks"
         ).fetchone()[0]
+        audit_log_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_logs"
+        ).fetchone()[0]
 
     print(f"Ingested {record_count} telemetry records into {DB_PATH}")
     print(f"  devices: {device_count}")
     print(f"  telemetry_snapshots: {snapshot_count}")
     print(f"  compliance_checks: {compliance_count}")
+    print(f"  audit_logs: {audit_log_count} (table ready)")
 
 
 if __name__ == "__main__":
