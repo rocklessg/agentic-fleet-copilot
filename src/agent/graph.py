@@ -105,6 +105,84 @@ def _get_llm() -> ChatOpenAI:
     )
 
 
+def _llm_available() -> bool:
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    return bool(api_key) and not api_key.startswith("your-")
+
+
+def _heuristic_plan(state: AgentState) -> dict[str, Any]:
+    query = state["input_query"].lower()
+    action_tokens = (
+        "remediation",
+        "upgrade",
+        "replace",
+        "notify",
+        "propose",
+        "ticket",
+        "action",
+    )
+    route = "action" if any(token in query for token in action_tokens) else "sql"
+    return {
+        "current_plan": [
+            {"route": route},
+            {"step": "Analyze request with deterministic planner fallback."},
+        ]
+    }
+
+
+def _heuristic_sql(state: AgentState) -> dict[str, Any]:
+    company_id = state["company_id"]
+    return {
+        "generated_sql": (
+            "SELECT d.device_id, ts.snapshot_id, ts.collected_at, "
+            "ts.os_product_name, ts.os_product_version, ts.battery_percentage, "
+            "ts.disk_size_bytes, ts.disk_available_bytes "
+            "FROM telemetry_snapshots ts "
+            "INNER JOIN devices d ON d.device_id = ts.device_id "
+            f"WHERE d.company_id = '{company_id}' "
+            "ORDER BY ts.collected_at DESC LIMIT 10"
+        )
+    }
+
+
+def _grounded_fallback_response(state: AgentState) -> str:
+    lines: list[str] = []
+    rows = state.get("query_results") or []
+    if rows:
+        lines.append("### Fleet findings")
+        for row in rows[:10]:
+            if "snapshot_id" in row:
+                citation = f"telemetry_snapshots/{row['snapshot_id']}"
+            elif "device_id" in row:
+                citation = f"devices/{row['device_id']}"
+            elif "compliance_id" in row:
+                citation = f"compliance_checks/{row['compliance_id']}"
+            else:
+                citation = "telemetry_snapshots/unknown"
+            device_id = row.get("device_id", "unknown")
+            lines.append(
+                f"- Device `{device_id}` telemetry reviewed "
+                f"[Source: {citation}]."
+            )
+
+    actions = state.get("proposed_actions") or []
+    if actions:
+        lines.append("### Proposed actions")
+        for item in actions[:10]:
+            action = item.get("action", {})
+            target = action.get("device_id") or action.get("employee_id") or "target"
+            lines.append(
+                f"- {action.get('action_type', 'action')} for `{target}` "
+                f"(status: {item.get('status', 'pending_approval')})."
+            )
+
+    decision = state.get("approval_decision")
+    if decision:
+        lines.append(f"### Approval decision\n- Administrator decision: **{decision}**")
+
+    return "\n".join(lines) or "No grounded fleet results were available for this request."
+
+
 def _parse_json_payload(content: str) -> dict[str, Any]:
     text = content.strip()
     if text.startswith("```"):
@@ -122,6 +200,9 @@ def _strip_sql(content: str) -> str:
 
 
 def planner_node(state: AgentState) -> dict[str, Any]:
+    if not _llm_available():
+        return _heuristic_plan(state)
+
     llm = _get_llm()
     response = llm.invoke(
         [
@@ -158,6 +239,9 @@ def route_after_planner(state: AgentState) -> Literal["sql_generation", "action_
 
 
 def sql_generation_node(state: AgentState) -> dict[str, Any]:
+    if not _llm_available():
+        return _heuristic_sql(state)
+
     llm = _get_llm()
     company_id = state["company_id"]
     response = llm.invoke(
@@ -382,6 +466,9 @@ def response_synthesizer_node(state: AgentState) -> dict[str, Any]:
     if state.get("final_response"):
         return {}
 
+    if not _llm_available():
+        return {"final_response": _grounded_fallback_response(state)}
+
     llm = _get_llm()
     context = {
         "input_query": state["input_query"],
@@ -391,29 +478,32 @@ def response_synthesizer_node(state: AgentState) -> dict[str, Any]:
         "approval_decision": state.get("approval_decision") or "",
         "generated_sql": state.get("generated_sql") or "",
     }
-    response = llm.invoke(
-        [
-            SystemMessage(
-                content=(
-                    "You are the Fleet Copilot response synthesizer.\n"
-                    "Ground every claim ONLY in the provided query_results and proposed_actions.\n"
-                    "Format findings as markdown bullet points or compact tables.\n"
-                    "Every factual statement MUST include a citation marker:\n"
-                    "[Source: table_name/primary_key_value]\n"
-                    "Use snapshot_id for telemetry_snapshots, device_id for devices, "
-                    "compliance_id for compliance_checks.\n"
-                    "Example:\n"
-                    "Device 'DEV-123' is low on disk space at 94% utilization "
-                    "[Source: telemetry_snapshots/892]. It runs macOS 14.2 and fails "
-                    "os_up_to_date [Source: compliance_checks/1204].\n"
-                    "If proposed_actions exist, summarize them and note approval_decision.\n"
-                    "Do not invent data."
-                )
-            ),
-            HumanMessage(content=json.dumps(context, default=str)),
-        ]
-    )
-    return {"final_response": str(response.content).strip()}
+    try:
+        response = llm.invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "You are the Fleet Copilot response synthesizer.\n"
+                        "Ground every claim ONLY in the provided query_results and proposed_actions.\n"
+                        "Format findings as markdown bullet points or compact tables.\n"
+                        "Every factual statement MUST include a citation marker:\n"
+                        "[Source: table_name/primary_key_value]\n"
+                        "Use snapshot_id for telemetry_snapshots, device_id for devices, "
+                        "compliance_id for compliance_checks.\n"
+                        "Example:\n"
+                        "Device 'DEV-123' is low on disk space at 94% utilization "
+                        "[Source: telemetry_snapshots/892]. It runs macOS 14.2 and fails "
+                        "os_up_to_date [Source: compliance_checks/1204].\n"
+                        "If proposed_actions exist, summarize them and note approval_decision.\n"
+                        "Do not invent data."
+                    )
+                ),
+                HumanMessage(content=json.dumps(context, default=str)),
+            ]
+        )
+        return {"final_response": str(response.content).strip()}
+    except Exception:
+        return {"final_response": _grounded_fallback_response(state)}
 
 
 def build_graph():
