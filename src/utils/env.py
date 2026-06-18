@@ -19,3 +19,7 @@ def load_project_env() -> None:
     langchain_key = os.getenv("LANGCHAIN_API_KEY", "")
     if not langchain_key or langchain_key.startswith("your-"):
         os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    else:
+        os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+        os.environ.setdefault("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com")
+        os.environ.setdefault("LANGCHAIN_PROJECT", "agentic-copilot")
