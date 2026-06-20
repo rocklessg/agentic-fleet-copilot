@@ -12,6 +12,7 @@ Agentic IT fleet management copilot built with **LangGraph**. Administrators ask
 - Guardrails: tenant isolation, read-only SQL, evidence-based action refusal, audit logging
 - Human-in-the-loop interrupts before any staged action proceeds
 - Deterministic pytest evaluation suite
+- GitHub Actions CI on push and pull requests to `main`
 - Optional LangSmith tracing
 
 ## Architecture
@@ -143,6 +144,20 @@ pytest evals/ -v
 
 The suite uses isolated SQLite fixtures and disables live LLM calls for deterministic verification.
 
+### Continuous integration
+
+GitHub Actions runs the same eval suite on every push and pull request to `main` (see `.github/workflows/ci.yml`):
+
+| Setting | Value |
+|---------|-------|
+| Runner | `ubuntu-latest` |
+| Python | 3.12 |
+| Command | `pytest evals/ -v --tb=short` |
+| API keys | Not required (live LLM disabled in fixtures) |
+| Dataset | Not required (tests use in-memory SQLite fixtures) |
+
+View workflow status under the repository **Actions** tab after pushing the workflow file.
+
 | Rubric area | Test module | Coverage |
 |-------------|-------------|----------|
 | Agent design | `test_copilot.py` | Planner routing, graph node transitions, HITL pause/resume/reject, LLM tool-calling |
@@ -150,7 +165,7 @@ The suite uses isolated SQLite fixtures and disables live LLM calls for determin
 | Insight & trend detection | `test_insights.py`, `test_copilot.py` | Battery decline, storage/memory pressure, compliance drift, graph insight node |
 | Action quality & guardrails | `test_tools.py`, `test_copilot.py` | All five tools, evidence refusal, audit events, tenant isolation |
 | Evaluation rigor | `test_ingest.py`, `test_api.py` | Ingest pipeline, FastAPI chat/approve/status flows |
-| Engineering | `test_api.py` | API health, 409 conflict handling, thread status |
+| Engineering | `test_api.py`, CI workflow | API health, 409 conflict handling, thread status, automated eval gate |
 
 **Representative cases:**
 
@@ -217,6 +232,9 @@ python scripts/run_langsmith_demo.py
 
 ```
 agentic-copilot/
+├── .github/
+│   └── workflows/
+│       └── ci.yml          # GitHub Actions eval gate
 ├── app.py                  # Streamlit UI
 ├── docker-compose.yml      # Local API + UI stack
 ├── Dockerfile
@@ -253,6 +271,7 @@ agentic-copilot/
 - **Staged actions, not auto-execution** — Approved actions are logged and summarized; no external ticketing/ERP integration in this take-home scope.
 - **SQLite** — Single-file, reproducible analytics store suitable for evaluation; not intended for multi-tenant production scale.
 - **Dataset outside git** — Keeps the repository lightweight; `bootstrap.py` fetches the canonical assessment dataset from Google Drive.
+- **CI without secrets** — GitHub Actions runs `pytest evals/` with no API keys or downloaded dataset; seeded fixtures keep the gate fast and deterministic.
 
 ## Project limitations and future enhancements
 
