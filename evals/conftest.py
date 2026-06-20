@@ -21,6 +21,7 @@ def patched_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any
     monkeypatch.setattr("src.agent.tools.DB_PATH", db_path)
     monkeypatch.setattr("src.database.ingest.DB_PATH", db_path)
     monkeypatch.setattr("src.agent.graph.DB_PATH", db_path)
+    monkeypatch.setattr("src.agent.insights.DB_PATH", db_path)
     return metadata
 
 

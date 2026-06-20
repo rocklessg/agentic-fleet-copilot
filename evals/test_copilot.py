@@ -296,3 +296,80 @@ def test_sql_readonly_blocks_mutations(
             company_id=COMPANY_A_ID,
             thread_id=str(thread_config["configurable"]["thread_id"]),
         )
+
+
+def test_insight_detection_node_in_graph(
+    patched_db: dict[str, Any], thread_config: dict[str, Any]
+) -> None:
+    def _fleet_health_sql(state: AgentState) -> dict[str, Any]:
+        company_id = state["company_id"]
+        return {
+            "generated_sql": (
+                "SELECT d.device_id, ts.snapshot_id, ts.collected_at "
+                "FROM telemetry_snapshots ts "
+                "INNER JOIN devices d ON d.device_id = ts.device_id "
+                f"WHERE d.company_id = '{company_id}' "
+                "ORDER BY ts.collected_at DESC LIMIT 20"
+            )
+        }
+
+    graph = build_patched_graph(sql_handler=_fleet_health_sql)
+    result = graph.invoke(
+        initial_state("Show fleet health trends and drift patterns", COMPANY_A_ID),
+        thread_config,
+    )
+
+    insights = result.get("detected_insights") or []
+    insight_types = {item["insight_type"] for item in insights}
+    assert "battery_decline" in insight_types
+    assert "compliance_drift" in insight_types
+    response = result.get("final_response") or ""
+    assert "### Fleet insights" in response
+    assert "[Source:" in response
+
+
+def test_llm_tool_action_proposal(
+    patched_db: dict[str, Any],
+    thread_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock, patch
+
+    from langchain_core.messages import AIMessage
+
+    from evals.helpers import force_action_plan
+    from src.agent import graph as graph_module
+    from src.agent.graph import build_graph
+
+    tool_call = {
+        "name": "flag_device_for_replacement",
+        "args": {
+            "device_id": patched_db["devices"]["low_battery"],
+            "reason": "Battery health below 50% on latest telemetry snapshot.",
+        },
+        "id": "call-1",
+        "type": "tool_call",
+    }
+    mock_llm = MagicMock()
+    mock_llm.bind_tools.return_value.invoke.return_value = AIMessage(
+        content="",
+        tool_calls=[tool_call],
+    )
+
+    monkeypatch.setattr(graph_module, "_llm_available", lambda: True)
+    monkeypatch.setattr(graph_module, "_get_llm", lambda: mock_llm)
+
+    with patch.object(graph_module, "planner_node", force_action_plan):
+        graph = build_graph()
+        result = graph.invoke(
+            initial_state(
+                "Propose replacement for failing battery devices", COMPANY_A_ID
+            ),
+            thread_config,
+        )
+
+    proposed = result.get("proposed_actions") or []
+    assert len(proposed) >= 1
+    assert proposed[0]["action"]["action_type"] == "flag_device_for_replacement"
+    assert proposed[0]["action"]["device_id"] == patched_db["devices"]["low_battery"]
+    mock_llm.bind_tools.assert_called_once()

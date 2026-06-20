@@ -18,6 +18,9 @@ DEVICE_LOW_DISK = "DEV-A3-LOW-DISK"
 DEVICE_COMPLIANCE_FAIL = "DEV-A4-COMPLIANCE-FAIL"
 DEVICE_TREND_BATTERY = "DEV-A5-TREND-BATTERY"
 DEVICE_HIGH_MEMORY = "DEV-A6-HIGH-MEMORY"
+DEVICE_TREND_DISK = "DEV-A7-TREND-DISK"
+DEVICE_TREND_MEMORY = "DEV-A8-TREND-MEMORY"
+DEVICE_DRIFT = "DEV-A9-DRIFT"
 DEVICE_GLOBEX = "DEV-B1-GLOBEX"
 
 ACTION_REFUSAL_MESSAGE = "Action Refused: Insufficient telemetry evidence"
@@ -105,6 +108,9 @@ def seed_test_database(db_path: Path) -> dict[str, Any]:
                 (DEVICE_COMPLIANCE_FAIL, COMPANY_A_ID, "EMP-A4"),
                 (DEVICE_TREND_BATTERY, COMPANY_A_ID, "EMP-A5"),
                 (DEVICE_HIGH_MEMORY, COMPANY_A_ID, "EMP-A6"),
+                (DEVICE_TREND_DISK, COMPANY_A_ID, "EMP-A7"),
+                (DEVICE_TREND_MEMORY, COMPANY_A_ID, "EMP-A8"),
+                (DEVICE_DRIFT, COMPANY_A_ID, "EMP-A9"),
                 (DEVICE_GLOBEX, COMPANY_B_ID, "EMP-B1"),
             ],
         )
@@ -176,6 +182,66 @@ def seed_test_database(db_path: Path) -> dict[str, Any]:
                 total_memory_bytes=10_000_000_000,
                 used_memory_bytes=9_600_000_000,
             ),
+            "trend_disk_old": _insert_snapshot(
+                conn,
+                DEVICE_TREND_DISK,
+                "2026-01-01T00:00:00Z",
+                battery_percentage=90,
+                disk_size_bytes=1_000_000_000,
+                disk_available_bytes=700_000_000,
+            ),
+            "trend_disk_mid": _insert_snapshot(
+                conn,
+                DEVICE_TREND_DISK,
+                "2026-01-20T00:00:00Z",
+                battery_percentage=90,
+                disk_size_bytes=1_000_000_000,
+                disk_available_bytes=300_000_000,
+            ),
+            "trend_disk_latest": _insert_snapshot(
+                conn,
+                DEVICE_TREND_DISK,
+                "2026-02-01T00:00:00Z",
+                battery_percentage=90,
+                disk_size_bytes=1_000_000_000,
+                disk_available_bytes=100_000_000,
+            ),
+            "trend_memory_old": _insert_snapshot(
+                conn,
+                DEVICE_TREND_MEMORY,
+                "2026-01-01T00:00:00Z",
+                battery_percentage=90,
+                disk_size_bytes=1_000_000_000,
+                disk_available_bytes=700_000_000,
+                total_memory_bytes=10_000_000_000,
+                used_memory_bytes=5_000_000_000,
+            ),
+            "trend_memory_latest": _insert_snapshot(
+                conn,
+                DEVICE_TREND_MEMORY,
+                "2026-02-01T00:00:00Z",
+                battery_percentage=90,
+                disk_size_bytes=1_000_000_000,
+                disk_available_bytes=700_000_000,
+                total_memory_bytes=10_000_000_000,
+                used_memory_bytes=9_200_000_000,
+            ),
+            "drift_old": _insert_snapshot(
+                conn,
+                DEVICE_DRIFT,
+                "2026-01-01T00:00:00Z",
+                battery_percentage=90,
+                disk_size_bytes=1_000_000_000,
+                disk_available_bytes=700_000_000,
+            ),
+            "drift_latest": _insert_snapshot(
+                conn,
+                DEVICE_DRIFT,
+                "2026-02-01T00:00:00Z",
+                battery_percentage=90,
+                disk_size_bytes=1_000_000_000,
+                disk_available_bytes=700_000_000,
+            ),
             "globex": _insert_snapshot(
                 conn,
                 DEVICE_GLOBEX,
@@ -204,6 +270,24 @@ def seed_test_database(db_path: Path) -> dict[str, Any]:
             "fail",
             "high",
         )
+        _insert_compliance(
+            conn,
+            snapshot_ids["drift_old"],
+            DEVICE_DRIFT,
+            "2026-01-01T00:00:00Z",
+            "os_up_to_date",
+            "pass",
+            "medium",
+        )
+        _insert_compliance(
+            conn,
+            snapshot_ids["drift_latest"],
+            DEVICE_DRIFT,
+            "2026-02-01T00:00:00Z",
+            "os_up_to_date",
+            "fail",
+            "high",
+        )
         conn.commit()
     finally:
         conn.close()
@@ -220,6 +304,9 @@ def seed_test_database(db_path: Path) -> dict[str, Any]:
             "compliance_fail": DEVICE_COMPLIANCE_FAIL,
             "trend_battery": DEVICE_TREND_BATTERY,
             "high_memory": DEVICE_HIGH_MEMORY,
+            "trend_disk": DEVICE_TREND_DISK,
+            "trend_memory": DEVICE_TREND_MEMORY,
+            "drift": DEVICE_DRIFT,
             "globex": DEVICE_GLOBEX,
         },
     }
@@ -232,6 +319,7 @@ def initial_state(message: str, company_id: str) -> AgentState:
         "current_plan": [],
         "generated_sql": "",
         "query_results": [],
+        "detected_insights": [],
         "proposed_actions": [],
         "approval_decision": "",
         "final_response": "",

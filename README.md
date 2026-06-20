@@ -5,8 +5,10 @@ Agentic IT fleet management copilot built with **LangGraph**. Administrators ask
 ## Features
 
 - Grounded Q&A over SQLite telemetry (tenant-scoped SQL)
+- Deterministic fleet insight detection (battery decline, storage/memory pressure, compliance drift)
 - Insight-oriented analytics via LLM-generated read-only queries
 - Action proposals: upgrades, remediation tickets, replacements, employee notifications
+- LLM tool-calling on the action path with rule-based fallback when the model is unavailable
 - Guardrails: tenant isolation, read-only SQL, evidence-based action refusal, audit logging
 - Human-in-the-loop interrupts before any staged action proceeds
 - Deterministic pytest evaluation suite
@@ -18,9 +20,10 @@ Agentic IT fleet management copilot built with **LangGraph**. Administrators ask
 flowchart LR
     UI[Streamlit app.py] --> API[FastAPI src/api/main.py]
     API --> Graph[LangGraph src/agent/graph.py]
-    Graph --> Planner --> SQLGen --> SQLExec --> Synth[response_synthesizer]
+    Graph --> Planner --> SQLGen --> SQLExec --> Insights[insight_detection] --> Synth[response_synthesizer]
     Graph --> Planner --> ActionProp --> HITL[action_execution_guardrail] --> Synth
     SQLExec --> Tools[src/agent/tools.py]
+    Insights --> InsightsMod[src/agent/insights.py]
     ActionProp --> Tools
     Tools --> DB[(SQLite data/telemetry.db)]
     Tools --> Audit[audit_logs]
@@ -33,7 +36,8 @@ flowchart LR
 | `planner` | Classify request as analytics (`sql`) or operational (`action`) |
 | `sql_generation` | Produce tenant-scoped read-only SQL |
 | `sql_execution` | Run query with security validation |
-| `action_proposal` | Scan latest telemetry anomalies and stage justified actions |
+| `insight_detection` | Scan tenant telemetry for battery decline, storage/memory pressure, and compliance drift |
+| `action_proposal` | Stage justified actions via LLM tool-calling (with rule-based fallback) |
 | `action_execution_guardrail` | Pause for administrator approval via LangGraph `interrupt()` |
 | `response_synthesizer` | Grounded markdown answer with `[Source: table/pk]` citations |
 
@@ -141,8 +145,9 @@ The suite uses isolated SQLite fixtures and disables live LLM calls for determin
 
 | Rubric area | Test module | Coverage |
 |-------------|-------------|----------|
-| Agent design | `test_copilot.py` | Planner routing, graph node transitions, HITL pause/resume/reject |
+| Agent design | `test_copilot.py` | Planner routing, graph node transitions, HITL pause/resume/reject, LLM tool-calling |
 | Grounding & correctness | `test_copilot.py` | Unknown metrics, citations, compliance grounding, battery trend SQL |
+| Insight & trend detection | `test_insights.py`, `test_copilot.py` | Battery decline, storage/memory pressure, compliance drift, graph insight node |
 | Action quality & guardrails | `test_tools.py`, `test_copilot.py` | All five tools, evidence refusal, audit events, tenant isolation |
 | Evaluation rigor | `test_ingest.py`, `test_api.py` | Ingest pipeline, FastAPI chat/approve/status flows |
 | Engineering | `test_api.py` | API health, 409 conflict handling, thread status |
@@ -158,6 +163,8 @@ The suite uses isolated SQLite fixtures and disables live LLM calls for determin
 - Human-in-the-loop checkpoint, approve, and reject
 - SQL read-only enforcement
 - Time-series battery decline trend query
+- Fleet insight detectors (battery, disk, memory, compliance drift)
+- LLM tool-calling action proposals with evidence guardrails
 - NDJSON ingest schema validation
 - REST API pause/approve workflow
 
@@ -173,9 +180,10 @@ The suite uses isolated SQLite fixtures and disables live LLM calls for determin
 ## Grounding strategy
 
 1. **SQL path** — LLM generates read-only, tenant-filtered SQL; results include tracing metadata.
-2. **Synthesis** — The response synthesizer must cite `[Source: telemetry_snapshots/<id>]`, `[Source: devices/<id>]`, or `[Source: compliance_checks/<id>]` for every factual claim.
-3. **Fallback** — Without an API key, heuristic SQL and a deterministic citation formatter still produce grounded output.
-4. **Actions** — Each proposal includes structured `evidence` (snapshot timestamps, utilization %, compliance status, trigger reason).
+2. **Insight detection** — After SQL execution, `insight_detection` scans historical snapshots for battery decline, storage/memory pressure, and compliance drift. Findings are cited and merged into the final response.
+3. **Synthesis** — The response synthesizer must cite `[Source: telemetry_snapshots/<id>]`, `[Source: devices/<id>]`, or `[Source: compliance_checks/<id>]` for every factual claim.
+4. **Fallback** — Without an API key, heuristic SQL and a deterministic citation formatter still produce grounded output.
+5. **Actions** — Each proposal includes structured `evidence` (snapshot timestamps, utilization %, compliance status, trigger reason). When an OpenAI key is present, the action path uses `bind_tools()` to let the LLM select tools; otherwise, or when tool calls fail validation, a rule-based scanner stages proposals.
 
 ## Guardrails
 
@@ -215,7 +223,8 @@ agentic-copilot/
 ├── evals/
 │   ├── conftest.py         # Shared pytest fixtures
 │   ├── helpers.py          # Seeded DB + graph test utilities
-│   ├── test_copilot.py     # Agent, grounding, guardrails, trends
+│   ├── test_copilot.py     # Agent, grounding, guardrails, trends, LLM tools
+│   ├── test_insights.py    # Fleet insight detectors
 │   ├── test_tools.py       # Direct tool + audit coverage
 │   ├── test_api.py         # FastAPI endpoint flows
 │   └── test_ingest.py      # NDJSON ingest pipeline
@@ -224,7 +233,10 @@ agentic-copilot/
 │   ├── download_dataset.py
 │   └── run_langsmith_demo.py
 ├── src/
-│   ├── agent/              # LangGraph + tools
+│   ├── agent/
+│   │   ├── graph.py        # LangGraph workflow
+│   │   ├── insights.py     # Trend and compliance drift detectors
+│   │   └── tools.py        # Fleet tools + SQL guardrails
 │   ├── api/                # FastAPI server
 │   ├── database/           # NDJSON ingest
 │   └── utils/              # Env + audit logger
@@ -236,7 +248,8 @@ agentic-copilot/
 ## Design decisions and trade-offs
 
 - **LangGraph over a prompt wrapper** — Explicit planner routing, conditional edges, checkpointing, and HITL interrupts provide auditable control flow.
-- **Rule-based action scanning** — `action_proposal_node` deterministically maps telemetry anomalies to tools, reducing unsafe LLM tool hallucination. Trade-off: less flexible than fully LLM-planned tool calls.
+- **Hybrid action planning** — The action path prefers LLM `bind_tools()` when an API key is available, but falls back to deterministic telemetry scanning if the model is unavailable or produces invalid tool calls. This balances adaptability with guardrail safety.
+- **Dedicated insight detectors** — `src/agent/insights.py` runs after SQL execution to surface multi-snapshot trends (battery fade, disk/memory pressure, compliance drift) with cited evidence, complementing ad-hoc LLM SQL.
 - **Staged actions, not auto-execution** — Approved actions are logged and summarized; no external ticketing/ERP integration in this take-home scope.
 - **SQLite** — Single-file, reproducible analytics store suitable for evaluation; not intended for multi-tenant production scale.
 - **Dataset outside git** — Keeps the repository lightweight; `bootstrap.py` fetches the canonical assessment dataset from Google Drive.
@@ -248,9 +261,9 @@ agentic-copilot/
 | Area | Limitation |
 |------|------------|
 | **Action execution** | After human approval, actions are **not executed** against external systems (Jira, ServiceNow, ERP, email). The copilot stages proposals, pauses for approval, logs `action_proposed` / `human_approval` audit events, and synthesizes a response — but does not open real tickets or place orders. |
-| **Trend / insight detection** | Time-series pattern detection is supported via SQL analytics and seeded eval cases, but there is no dedicated insight engine or scheduled trend scanner. Compliance drift and multi-week degradation patterns rely on LLM/heuristic SQL rather than a purpose-built analytics node. |
+| **Insight scope** | Insight detectors run on historical snapshots within the tenant DB at query time. There is no scheduled background scanner or fleet-wide alerting pipeline. |
 | **Installed software** | The NDJSON dataset includes `installed_software`, but the SQLite schema and agent tools do not model or query installed applications yet. |
-| **LLM action planning** | The action path uses deterministic telemetry scanning instead of LLM-selected tool calls. Safer for guardrails, less adaptive for novel remediation strategies. |
+| **LLM variability** | Live LLM SQL and tool-calling quality is not benchmarked in CI; evals use seeded fixtures and mocked graph paths for determinism. |
 | **Authentication** | `company_id` is client-supplied (demo trust model). No API authentication, RBAC, or per-user audit attribution beyond a static `admin` actor. |
 | **Checkpoint persistence** | LangGraph `MemorySaver` is in-process only. Thread state is lost on API restart. |
 | **Scale** | Single-node SQLite and synchronous graph execution. Not designed for concurrent multi-tenant production load. |
@@ -260,13 +273,12 @@ agentic-copilot/
 ### Planned future enhancements
 
 1. **Post-approval execution layer** — Add an `action_execution` graph node that records `action_executed` audit events and integrates with ticketing/ERP webhooks after approval.
-2. **Dedicated insight service** — Time-window aggregations for battery fade, storage pressure, RAM saturation, and compliance drift with ranked findings and explanations.
+2. **Scheduled insight pipeline** — Background trend scanning with ranked fleet-wide findings and proactive alerting.
 3. **Installed software schema** — Extend ingest + SQL generation to answer software inventory and version compliance questions.
-4. **LLM tool-calling with guardrails** — Allow the planner to select tools while retaining evidence validators before staging.
-5. **Persistent checkpoints** — Swap `MemorySaver` for Postgres/SQLite-backed LangGraph checkpointer.
-6. **AuthN / AuthZ** — API keys or SSO, tenant claims bound to session, per-admin audit attribution.
-7. **LangSmith eval datasets** — Export pytest scenarios as regression datasets for live-model CI gates.
-8. **Production deployment profile** — Hardened Docker/Kubernetes manifests, health probes, and secrets injection separate from the local Compose demo.
+4. **Persistent checkpoints** — Swap `MemorySaver` for Postgres/SQLite-backed LangGraph checkpointer.
+5. **AuthN / AuthZ** — API keys or SSO, tenant claims bound to session, per-admin audit attribution.
+6. **LangSmith eval datasets** — Export pytest scenarios as regression datasets for live-model CI gates.
+7. **Production deployment profile** — Hardened Docker/Kubernetes manifests, health probes, and secrets injection separate from the local Compose demo.
 
 ## Manual dataset download
 
