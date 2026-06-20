@@ -12,9 +12,9 @@ load_project_env()
 API_BASE_URL = os.getenv("FLEET_API_URL", "http://127.0.0.1:8000")
 
 TENANTS = {
-    "Company_A": "acme-001",
-    "Company_B": "globex-002",
-    "Company_C": "initech-003",
+    "Acme": "acme-001",
+    "Globex": "globex-002",
+    "Initech": "initech-003",
 }
 
 
@@ -30,7 +30,7 @@ def _init_session_state() -> None:
     if "last_query_results" not in st.session_state:
         st.session_state.last_query_results = []
     if "tenant_label" not in st.session_state:
-        st.session_state.tenant_label = "Company_A"
+        st.session_state.tenant_label = "Acme"
 
 
 def _reset_thread() -> None:

@@ -270,7 +270,7 @@ def test_tenant_isolation_enforcement(
         graph = build_graph()
         result = graph.invoke(
             _initial_state(
-                "List compliance tickets for Company_B",
+                "List compliance tickets for Globex",
                 COMPANY_A_ID,
             ),
             config,
@@ -291,7 +291,7 @@ def test_tenant_isolation_enforcement(
             ),
             company_id=COMPANY_A_ID,
             thread_id=str(config["configurable"]["thread_id"]),
-            natural_language_context="List compliance tickets for Company_B",
+            natural_language_context="List compliance tickets for Globex",
         )
 
 
