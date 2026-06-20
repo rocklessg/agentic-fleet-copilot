@@ -4,7 +4,8 @@ import re
 import sqlite3
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.tools import StructuredTool
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
@@ -12,6 +13,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from typing_extensions import TypedDict
 
+from src.agent.insights import detect_fleet_insights, format_insights_markdown
 from src.agent.tools import (
     SecurityError,
     create_upgrade_order,
@@ -88,6 +90,7 @@ class AgentState(TypedDict):
     current_plan: list
     generated_sql: str
     query_results: list
+    detected_insights: list
     proposed_actions: list
     approval_decision: str
     final_response: str
@@ -147,6 +150,10 @@ def _heuristic_sql(state: AgentState) -> dict[str, Any]:
 
 def _grounded_fallback_response(state: AgentState) -> str:
     lines: list[str] = []
+    insights = state.get("detected_insights") or []
+    if insights:
+        lines.append(format_insights_markdown(insights))
+
     rows = state.get("query_results") or []
     if rows:
         lines.append("### Fleet findings")
@@ -282,66 +289,24 @@ def sql_execution_node(state: AgentState, config: RunnableConfig) -> dict[str, A
     except SecurityError as exc:
         return {
             "query_results": [],
+            "detected_insights": [],
             "final_response": f"Security violation: {exc}",
         }
 
 
-def _latest_anomalies(company_id: str) -> list[dict[str, Any]]:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(
-            """
-            SELECT
-                ts.snapshot_id,
-                ts.device_id,
-                d.employee_id,
-                ts.collected_at,
-                ts.battery_percentage,
-                ts.disk_size_bytes,
-                ts.disk_available_bytes,
-                ts.used_memory_bytes,
-                ts.total_memory_bytes,
-                cc.check_id,
-                cc.status AS compliance_status,
-                cc.severity
-            FROM telemetry_snapshots ts
-            INNER JOIN devices d ON d.device_id = ts.device_id
-            LEFT JOIN compliance_checks cc
-              ON cc.snapshot_id = ts.snapshot_id
-            INNER JOIN (
-                SELECT device_id, MAX(collected_at) AS collected_at
-                FROM telemetry_snapshots
-                GROUP BY device_id
-            ) latest
-              ON ts.device_id = latest.device_id
-             AND ts.collected_at = latest.collected_at
-            WHERE d.company_id = ?
-            """,
-            (company_id,),
-        ).fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
+def insight_detection_node(state: AgentState) -> dict[str, Any]:
+    if state.get("final_response"):
+        return {}
+
+    if not (state.get("query_results") or []):
+        return {"detected_insights": []}
+
+    return {"detected_insights": detect_fleet_insights(state["company_id"])}
 
 
-def _disk_utilization(row: dict[str, Any]) -> float:
-    size_bytes = row.get("disk_size_bytes") or 0
-    available_bytes = row.get("disk_available_bytes") or 0
-    if size_bytes <= 0:
-        return 0.0
-    return ((size_bytes - available_bytes) / size_bytes) * 100.0
-
-
-def _memory_utilization(row: dict[str, Any]) -> float:
-    total_bytes = row.get("total_memory_bytes") or 0
-    used_bytes = row.get("used_memory_bytes") or 0
-    if total_bytes <= 0:
-        return 0.0
-    return (used_bytes / total_bytes) * 100.0
-
-
-def action_proposal_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+def _rule_based_action_proposal(
+    state: AgentState, config: RunnableConfig
+) -> dict[str, Any]:
     company_id = state["company_id"]
     thread_id = _thread_id(config)
     staged_actions: list[dict[str, Any]] = []
@@ -422,6 +387,193 @@ def action_proposal_node(state: AgentState, config: RunnableConfig) -> dict[str,
     return {"proposed_actions": staged_actions}
 
 
+def _build_action_tools(
+    company_id: str,
+    thread_id: str,
+    staged_actions: list[dict[str, Any]],
+) -> list[StructuredTool]:
+    def flag_replacement(device_id: str, reason: str) -> str:
+        flag_device_for_replacement(
+            device_id=device_id,
+            reason=reason,
+            company_id=company_id,
+            thread_id=thread_id,
+            staged_actions=staged_actions,
+        )
+        return f"Staged flag_device_for_replacement for {device_id}"
+
+    def remediation_ticket(device_id: str, check_id: str, note: str) -> str:
+        open_remediation_ticket(
+            device_id=device_id,
+            check_id=check_id,
+            note=note,
+            company_id=company_id,
+            thread_id=thread_id,
+            staged_actions=staged_actions,
+        )
+        return f"Staged open_remediation_ticket for {device_id}"
+
+    def upgrade_order(device_id: str, component: str, spec: str) -> str:
+        create_upgrade_order(
+            device_id=device_id,
+            component=component,
+            spec=spec,
+            company_id=company_id,
+            thread_id=thread_id,
+            staged_actions=staged_actions,
+        )
+        return f"Staged create_upgrade_order for {device_id}"
+
+    def employee_notification(employee_id: str, message: str) -> str:
+        notify_employee(
+            employee_id=employee_id,
+            message=message,
+            company_id=company_id,
+            thread_id=thread_id,
+            staged_actions=staged_actions,
+        )
+        return f"Staged notify_employee for {employee_id}"
+
+    return [
+        StructuredTool.from_function(
+            func=flag_replacement,
+            name="flag_device_for_replacement",
+            description="Flag a device for replacement when battery or disk telemetry justifies it.",
+        ),
+        StructuredTool.from_function(
+            func=remediation_ticket,
+            name="open_remediation_ticket",
+            description="Open a remediation ticket for a failing compliance check on a device.",
+        ),
+        StructuredTool.from_function(
+            func=upgrade_order,
+            name="create_upgrade_order",
+            description="Create a hardware upgrade order for disk, memory, or battery components.",
+        ),
+        StructuredTool.from_function(
+            func=employee_notification,
+            name="notify_employee",
+            description="Notify an employee about a justified device issue on their fleet hardware.",
+        ),
+    ]
+
+
+def _llm_tool_action_proposal(
+    state: AgentState, config: RunnableConfig
+) -> dict[str, Any]:
+    company_id = state["company_id"]
+    thread_id = _thread_id(config)
+    staged_actions: list[dict[str, Any]] = []
+    anomalies = _latest_anomalies(company_id)
+    tools = _build_action_tools(company_id, thread_id, staged_actions)
+    tool_map = {tool.name: tool for tool in tools}
+    llm = _get_llm().bind_tools(tools)
+
+    response = llm.invoke(
+        [
+            SystemMessage(
+                content=(
+                    "You are the Fleet Copilot action planner. Review telemetry and "
+                    "call tools to propose justified operational actions.\n"
+                    "Rules:\n"
+                    "- Only call tools when telemetry evidence supports the action.\n"
+                    "- Use flag_device_for_replacement for failing batteries or critical disk pressure.\n"
+                    "- Use open_remediation_ticket for failing compliance checks.\n"
+                    "- Use create_upgrade_order for disk/memory constraints.\n"
+                    "- Use notify_employee when employee outreach is requested and issues exist.\n"
+                    "- You may call zero or more tools."
+                )
+            ),
+            HumanMessage(
+                content=(
+                    f"Company ID: {company_id}\n"
+                    f"User query: {state['input_query']}\n"
+                    f"Latest telemetry anomalies:\n"
+                    f"{json.dumps(anomalies, default=str)}"
+                )
+            ),
+        ]
+    )
+
+    if isinstance(response, AIMessage):
+        for tool_call in response.tool_calls or []:
+            tool = tool_map.get(tool_call["name"])
+            if tool is None:
+                continue
+            try:
+                tool.invoke(tool_call["args"])
+            except (ValueError, TypeError):
+                continue
+
+    return {"proposed_actions": staged_actions}
+
+
+def action_proposal_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    if _llm_available():
+        try:
+            llm_result = _llm_tool_action_proposal(state, config)
+            if llm_result.get("proposed_actions"):
+                return llm_result
+        except Exception:
+            pass
+    return _rule_based_action_proposal(state, config)
+
+
+def _latest_anomalies(company_id: str) -> list[dict[str, Any]]:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                ts.snapshot_id,
+                ts.device_id,
+                d.employee_id,
+                ts.collected_at,
+                ts.battery_percentage,
+                ts.disk_size_bytes,
+                ts.disk_available_bytes,
+                ts.used_memory_bytes,
+                ts.total_memory_bytes,
+                cc.check_id,
+                cc.status AS compliance_status,
+                cc.severity
+            FROM telemetry_snapshots ts
+            INNER JOIN devices d ON d.device_id = ts.device_id
+            LEFT JOIN compliance_checks cc
+              ON cc.snapshot_id = ts.snapshot_id
+            INNER JOIN (
+                SELECT device_id, MAX(collected_at) AS collected_at
+                FROM telemetry_snapshots
+                GROUP BY device_id
+            ) latest
+              ON ts.device_id = latest.device_id
+             AND ts.collected_at = latest.collected_at
+            WHERE d.company_id = ?
+            """,
+            (company_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _disk_utilization(row: dict[str, Any]) -> float:
+    size_bytes = row.get("disk_size_bytes") or 0
+    available_bytes = row.get("disk_available_bytes") or 0
+    if size_bytes <= 0:
+        return 0.0
+    return ((size_bytes - available_bytes) / size_bytes) * 100.0
+
+
+def _memory_utilization(row: dict[str, Any]) -> float:
+    total_bytes = row.get("total_memory_bytes") or 0
+    used_bytes = row.get("used_memory_bytes") or 0
+    if total_bytes <= 0:
+        return 0.0
+    return (used_bytes / total_bytes) * 100.0
+
+
 def action_execution_guardrail_node(
     state: AgentState, config: RunnableConfig
 ) -> dict[str, Any]:
@@ -474,6 +626,7 @@ def response_synthesizer_node(state: AgentState) -> dict[str, Any]:
         "input_query": state["input_query"],
         "company_id": state["company_id"],
         "query_results": state.get("query_results") or [],
+        "detected_insights": state.get("detected_insights") or [],
         "proposed_actions": state.get("proposed_actions") or [],
         "approval_decision": state.get("approval_decision") or "",
         "generated_sql": state.get("generated_sql") or "",
@@ -484,16 +637,14 @@ def response_synthesizer_node(state: AgentState) -> dict[str, Any]:
                 SystemMessage(
                     content=(
                         "You are the Fleet Copilot response synthesizer.\n"
-                        "Ground every claim ONLY in the provided query_results and proposed_actions.\n"
+                        "Ground every claim ONLY in the provided query_results, "
+                        "detected_insights, and proposed_actions.\n"
                         "Format findings as markdown bullet points or compact tables.\n"
                         "Every factual statement MUST include a citation marker:\n"
                         "[Source: table_name/primary_key_value]\n"
                         "Use snapshot_id for telemetry_snapshots, device_id for devices, "
                         "compliance_id for compliance_checks.\n"
-                        "Example:\n"
-                        "Device 'DEV-123' is low on disk space at 94% utilization "
-                        "[Source: telemetry_snapshots/892]. It runs macOS 14.2 and fails "
-                        "os_up_to_date [Source: compliance_checks/1204].\n"
+                        "Summarize detected_insights with finding, evidence, and brief explanation.\n"
                         "If proposed_actions exist, summarize them and note approval_decision.\n"
                         "Do not invent data."
                     )
@@ -512,6 +663,7 @@ def build_graph():
     builder.add_node("planner", planner_node)
     builder.add_node("sql_generation", sql_generation_node)
     builder.add_node("sql_execution", sql_execution_node)
+    builder.add_node("insight_detection", insight_detection_node)
     builder.add_node("action_proposal", action_proposal_node)
     builder.add_node("action_execution_guardrail", action_execution_guardrail_node)
     builder.add_node("response_synthesizer", response_synthesizer_node)
@@ -526,7 +678,8 @@ def build_graph():
         },
     )
     builder.add_edge("sql_generation", "sql_execution")
-    builder.add_edge("sql_execution", "response_synthesizer")
+    builder.add_edge("sql_execution", "insight_detection")
+    builder.add_edge("insight_detection", "response_synthesizer")
     builder.add_edge("action_proposal", "action_execution_guardrail")
     builder.add_edge("action_execution_guardrail", "response_synthesizer")
     builder.add_edge("response_synthesizer", END)

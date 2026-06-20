@@ -56,6 +56,7 @@ def _initial_state(message: str, company_id: str) -> dict[str, Any]:
         "current_plan": [],
         "generated_sql": "",
         "query_results": [],
+        "detected_insights": [],
         "proposed_actions": [],
         "approval_decision": "",
         "final_response": "",
