@@ -335,7 +335,10 @@ def _flush_batch(conn: sqlite3.Connection, batch: list[dict]) -> int:
 
 def main() -> None:
     if not NDJSON_PATH.exists():
-        raise FileNotFoundError(f"Dataset not found: {NDJSON_PATH}")
+        raise FileNotFoundError(
+            f"Dataset not found: {NDJSON_PATH}. "
+            "Run `python scripts/bootstrap.py` to download and ingest telemetry data."
+        )
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 

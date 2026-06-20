@@ -5,3 +5,5 @@ streamlit
 pydantic
 pytest
 langchain-openai
+httpx
+pandas
