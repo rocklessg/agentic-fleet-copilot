@@ -87,5 +87,6 @@ Thumbs.db
 *.db
 *.sqlite3
 data/*.db
+data/device-telemetry-dataset.ndjson
 _assessment_extract.txt
 Take-Home Assessment*.pdf

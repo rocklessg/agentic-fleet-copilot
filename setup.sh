@@ -26,17 +26,23 @@ python -m pip install --upgrade pip
 echo "Installing requirements..."
 pip install -r requirements.txt
 
+if [[ ! -f ".env" ]]; then
+    echo "Creating .env from .env.example ..."
+    cp .env.example .env
+    echo "Update .env with your OPENAI_API_KEY and LANGCHAIN_API_KEY before running the agent."
+fi
+
+echo "Downloading dataset and building telemetry database..."
+python scripts/bootstrap.py
+
 echo ""
 echo "Setup complete."
 echo "  Virtual environment: ${VENV_DIR}"
 echo "  Python: $(python --version)"
-echo "  Packages installed from requirements.txt"
 echo ""
-echo "To activate the environment manually:"
-if [[ -f "${VENV_DIR}/Scripts/activate" ]]; then
-    echo "  source ${VENV_DIR}/Scripts/activate"
-else
-    echo "  source ${VENV_DIR}/bin/activate"
-fi
-echo ""
-echo "Copy .env.example to .env and fill in your API keys before running the agent."
+echo "Next steps:"
+echo "  1. Edit .env with your API keys"
+echo "  2. Start API:  uvicorn src.api.main:app --reload --host 127.0.0.1 --port 8000"
+echo "  3. Start UI:   streamlit run app.py"
+echo "  Or use Docker: docker compose up --build"
+echo "  Run evals:     pytest evals/test_copilot.py -v"
